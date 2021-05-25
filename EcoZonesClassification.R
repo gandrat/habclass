@@ -1,4 +1,5 @@
 
+
 #Load packages---------
 library(raster)
 library(factoextra)
@@ -8,16 +9,21 @@ library(corrplot)
 library(fpc)
 library(RColorBrewer)
 library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(dplyr)
+
+
 
 #read and stack rasters-------------
-files<-list.files('input_data/SA',full.names = T)
+# files<-list.files('input_data/SA',full.names = T)
+# 
+# var<-stack(files)
+# 
+# names(var)<-c('bbpi','curspeed','depth','oxigen','ligth','nitrate','phosphate','poc','salinity','silicate','slope','temperature')
+# 
+# save(var,file='south_atlantic_dataset.Rda')
 
-var<-stack(files)
-plot(var)
-
-names(var)<-c('bbpi','bioregion','curspeed','depth','oxigen','ligth','nitrate','phosphate','poc','salinity','silicate','slope','temperature')
-
-save(var,file='south_atlantic_dataset.Rda')
 #Set the theme for plots----------
 theme_set(
   theme_bw(base_size = 14)+
@@ -26,12 +32,17 @@ theme_set(
           panel.grid.major = element_blank(), panel.grid.minor = element_blank())
 )
 
+load('south_atlantic_dataset.Rda')
+
+#Create mask
+mask<-var$depth<=0
+plot(mask)
 
 #PCA------------------------
 gc()
 var.df<-as.data.frame(var)
 var.df<-var.df[complete.cases(var.df),]
-
+head(var)
 res.pca<-prcomp(var.df,scale = TRUE)
 
 
@@ -72,8 +83,7 @@ summary(res.pca)
 plot(pca$map)
 
 pc<-stack(subset(pca$map,c(1:4)))
-# pc<-pca$map
-plot(pc)
+# plot(pc)
 writeRaster(pca$map, "output_data/pca.tif")
 
 #Mapas PCA-----
@@ -116,7 +126,6 @@ ggsave('figures/pca_maps.jpg', dpi=150,
 
 #Correlation among descriptors and PCs--------
 var_pca<-stack(var, pc)
-plot(var_pca)
 
 pca.df<-as.data.frame(var_pca)
 pca.df<-pca.df[complete.cases(pca.df),]
@@ -128,7 +137,7 @@ png(height=500, width=700, file="figures/corplot.png", type = "cairo")
 corrplot(c,method='square',type='lower')
 dev.off()
 
-#CH-index------
+#Calinski-Harabasz index------
 
 df <- as.data.frame(scale(pc))
 
@@ -137,46 +146,41 @@ df<-as.data.frame(df[complete.cases(df),])
 ci=data.frame(1,NA)
 names(ci)=c('i','cii')
 
-for(i in c(2:20)){
-  c<-kmeans(df, i, iter.max = 100000)
-  cii<-calinhara(df,c$cluster)
+for(i in c(2:30)){
+  c<-kmeans(df, i)
+  cii<-calinhara(df,c$cluster,cn=i)
   ci<-rbind(ci,data.frame(i,cii))
 }
 
-#Grafico C-H
+#Get highest values of CH Index
+
+ci%>%arrange(-cii)
+
+#Plot CI
 ggplot(ci,aes(x=i,y=cii/10000))+geom_point(size=.5)+geom_line(size=.3)+
   theme_bw()+xlab('Clusters')+ylab('Calinski-Harabasz Index')+
   geom_vline(xintercept = 8, linetype=2)+
-  geom_vline(xintercept = 14, linetype=2)+
-  scale_x_continuous(breaks = c(2,4,6,8,10,12,14,16,18,20))
+  geom_vline(xintercept = 14, linetype=2)
 
 
 ggsave("figures/ch_index.jpg", 
        width = 13 , height = 6, units = 'in', dpi = 200)
 
-#Cluster analysis
+#Cluster analysis------------
 full_pc<-pc
 
 full_pc[is.na(full_pc[])] <- -20
 
 
 df<-as.data.frame(full_pc)
-cbig<-kmeans(df, 14, iter.max = 100000)
-csmall<-kmeans(df, 8, iter.max = 100000)
+zones<-kmeans(df, 14)
 
-max(var$depth)
-mask<-reclassify(var$depth,c(-8000,0,1))
-plot(mask)
-cbig.r <- setValues(mask, cbig$cluster)*mask
-plot(cbig.r)
-csmall.r <- setValues(mask, csmall$cluster)*mask
-plot(csmall.r)
+zones.r <- setValues(mask, zones$cluster)*mask
+plot(zones.r)
 
+table(zones$cluster)
 
-table(cbig$cluster)
-table(csmall$cluster)
-
-#Filtro espacial para eliminar ruidos----------
+#Noise reduction with focal mode---------
 
 f <- function(x){
   tab <- table(x)
@@ -185,66 +189,45 @@ f <- function(x){
   names(tab)[which.max(tab)][1]
 }
 
-cbig.focal <- focal(cbig.r, w=matrix(1,5,5), fun=f)*mask
-csmall.focal<-focal(csmall.r, w=matrix(1,5,5), fun=f)*mask
+zones.focal <- focal(zones.r, w=matrix(1,5,5), fun=f)*mask
+zones<-zones.focal
 
-clust<-stack(cbig.focal, csmall.focal)
-
-plot(clust)
-names(clust)<-c('c14','c8')
-save(clust,file='output_data/habitatsv1.Rda')
+save(zones,file='output_data/habitatsv2.Rda')
 
 #Plot clusters-----------
-c.p <- rasterToPoints(clust)
+zones.p <- rasterToPoints(zones)
 
 #Make the points a dataframe for ggplot
-c.df <- data.frame(c.p)
+zones.df <- data.frame(zones.p)
 
-names(c.df)<-c('x','y','14_clusters','8_clusters')
+names(zones.df)<-c('x','y','zone')
 
-d<-melt(c.df,id=c('x','y'))
-
-d<-d[complete.cases(d),]
-unique(d$value)
-
+d<-zones.df[complete.cases(zones.df),]
 
 # Define the number of colors you want
-nb.cols <- 14
-mycolors <- colorRampPalette(brewer.pal(10, "Set3"))(nb.cols)
+nb.cols <- max(d$zone,na.rm=T)
+mycolors <- colorRampPalette(brewer.pal(12, "Set3"))(nb.cols)
 
-ggplot()+geom_raster(data=d%>%filter(variable=='8_clusters'),aes(y=y,x=x, fill=factor(value)))+theme_bw()+
-  # facet_wrap(~variable,ncol=1)+
+ggplot()+geom_raster(data=d,aes(y=y,x=x, fill=factor(zone)))+theme_bw()+
   coord_equal(xlim = c(minlon, maxlon),ylim = c(minlat, maxlat))+
   xlab(NULL)+ylab(NULL)+
   scale_fill_manual(values=mycolors, name='Zones')+
   mapWorld
 
-ggsave("figures/habitat_clusters_8c.jpg", 
+ggsave("figures/benthic_zones_map.jpg", 
        width = 14 , height = 7, units = 'in', dpi = 200)
-
-ggplot()+geom_raster(data=d%>%filter(variable=='14_clusters'),aes(y=y,x=x, fill=factor(value)))+theme_bw()+
-  # facet_wrap(~variable,ncol=1)+
-  coord_equal(xlim = c(minlon, maxlon),ylim = c(minlat, maxlat))+
-  xlab(NULL)+ylab(NULL)+
-  scale_fill_manual(values=mycolors, name='Zones')+
-  mapWorld
-  
-
-ggsave("figures/habitat_clusters_14c.jpg", 
-       width = 14 , height = 7, units = 'in', dpi = 200)
-table(d$value,d$variable)
-
 
 #Boxplots to describe clusters------------------
-s <- stack(var, clust$c14)
+names(zones)<-'zone'
+s <- stack(var, zones)
 
 s.df<-as.data.frame(s)
 s.df<-s.df[complete.cases(s.df),]
 
-unique(s.df$c14)
-s.m<-melt(s.df,id='c14')
+unique(s.df$zone)
+s.m<-melt(s.df,id='zone')
 
-ggplot(s.m,aes(x=factor(c14),y=value,fill=factor(c14)))+
+ggplot(s.m,aes(x=factor(zone),y=value,fill=factor(zone)))+
   geom_boxplot(outlier.size=.1,lwd=.1)+
   facet_wrap(~variable,scales='free',ncol=5)+
   theme_bw()+
@@ -252,22 +235,22 @@ ggplot(s.m,aes(x=factor(c14),y=value,fill=factor(c14)))+
   theme(legend.position="none")+
   xlab(NULL)+ylab(NULL)
 
-
-ggsave('figures/boxplots.jpg',
+ggsave('figures/boxplots_zone.jpg',
        width=16, height=6.5, unit='in', dpi=200)
 
 #Decision Tree--------------
-load('output_data/habitatsv1.Rda')
+load('output_data/habitatsv2.Rda')
 load('south_atlantic_dataset.Rda')
 s<-stack(var,clust)
-names(s)<-c('bbpi','bioregion','curspeed','depth','oxigen','ligth','nitrate','phosphate','poc','salinity','silicate','slope','temperature','clust14','clust8')
-plot(s)
+names(s)<-c('bbpi','curspeed','depth','oxigen','ligth','nitrate',
+            'phosphate','poc','salinity','silicate','slope','temperature','zone')
+
 s.df<-as.data.frame(s)
 
 s.df<-s.df[complete.cases(s.df),]
-s.df$zone<-factor(s.df$clust14)
+s.df$zone<-factor(s.df$zone)
 
-s.df<-s.df%>%select(-clust8,-clust14)
+
 bfit <- rpart(zone~., method="class", data=s.df)
 printcp(bfit) # display the results 
 plotcp(bfit) # visualize cross-validation results 
